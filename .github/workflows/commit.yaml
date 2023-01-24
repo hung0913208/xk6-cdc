@@ -1,0 +1,96 @@
+name: Do smoke test
+
+on:
+  push:
+    branches:
+      - '*'
+      - '!main'
+      - '!master'
+    tags:
+      - '^v*'
+
+jobs:
+  run_unit_tests:
+    runs-on: ubuntu-latest
+    container: ubuntu:latest
+    services:
+      postgres:
+        image: eventuateio/eventuate-postgres:0.12.0.RELEASE
+        ports:
+          - 5432:5432
+        env:
+          USE_DB_ID: true
+          USE_JSON_PAYLOAD_AND_HEADERS: true
+          POSTGRES_DB: test-event
+          POSTGRES_USER: eventuate
+          POSTGRES_PASSWORD: eventuate
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:5.0.3
+        ports:
+          - 6379:6379
+
+      zookeeper:
+        image: bitnami/zookeeper
+        ports:
+          - 2181:2181
+        env:
+          ALLOW_ANONYMOUS_LOGIN: yes
+          ZOOKEEPER_CLIENT_PORT: 2181
+          ZOOKEEPER_TICK_TIME: 2000
+          ZOOKEEPER_SYNC_LIMIT: 2
+
+      kafka:
+        image: bitnami/kafka
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+          ALLOW_PLAINTEXT_LISTENER: yes
+          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+
+      cdc-service:
+        image: eventuateio/eventuate-cdc-service:0.9.0.RELEASE
+        ports:
+          - "8099:8080"
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://postgres/test-event
+          SPRING_DATASOURCE_USERNAME: eventuate
+          SPRING_DATASOURCE_PASSWORD: eventuate
+          SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+          EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+          EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING: zookeeper:2181
+          EVENTUATELOCAL_CDC_READER_NAME: PostgresWalReader
+          EVENTUATE_OUTBOX_ID: 1
+          SPRING_PROFILES_ACTIVE: postgres,PostgresWal
+          EVENTUATE_REDIS_SERVERS: redis:6379
+          EVENTUATE_REDIS_PARTITIONS: 1
+          EVENTUATE_CDC_TYPE: EventuateLocal
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup environment for developing
+        run: |
+          DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt update
+          DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt install -y golang make postgresql git kafkacat
+
+      - name: Validate postgreqsql server has started
+        run: pg_isready -U "postgres" -h postgres -p 5432
+
+      - name: Validate kafka
+        run: |
+          for i in {0..10}; do
+            kafkacat -b kafka:9092 -L
+            sleep 10
+          done
+          kafkacat -P -b kafka:9092 -t awesome-topic
+
+      - name: Run unit test suites
+        run: make test
